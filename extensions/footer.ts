@@ -1,11 +1,13 @@
+import { execFile, spawnSync } from "node:child_process";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { spawnSync } from "child_process";
 
 const PR_STATUS_TTL = 10_000;
+const DIFF_STATS_TTL = 5_000;
 
-function git(...args: string[]): string | null {
+/** Sync git call — only used for fast local operations (no network). */
+function gitSync(...args: string[]): string | null {
 	try {
 		const result = spawnSync("git", args, {
 			encoding: "utf8",
@@ -18,22 +20,23 @@ function git(...args: string[]): string | null {
 	}
 }
 
-function gh(...args: string[]): string | null {
-	try {
-		const result = spawnSync("gh", args, {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-			timeout: 5000,
-		});
-		return result.status === 0 ? result.stdout.trim() : null;
-	} catch {
-		return null;
-	}
+/** Async shell command — returns stdout or null. */
+function execAsync(cmd: string, args: string[]): Promise<string | null> {
+	return new Promise((resolve) => {
+		execFile(
+			cmd,
+			args,
+			{ encoding: "utf8", timeout: 10_000 },
+			(err, stdout) => {
+				resolve(err ? null : stdout.trim() || null);
+			},
+		);
+	});
 }
 
 function getBaseBranch(): string {
 	return (
-		git("symbolic-ref", "refs/remotes/origin/HEAD")?.replace(
+		gitSync("symbolic-ref", "refs/remotes/origin/HEAD")?.replace(
 			/^refs\/remotes\/origin\//,
 			"",
 		) || "master"
@@ -46,12 +49,10 @@ interface DiffStats {
 	files: number;
 }
 
-function getGitDiffStats(baseBranch: string): DiffStats | null {
-	const stat = git("diff", baseBranch, "--shortstat");
-	if (!stat) return null;
-	const added = parseInt(stat.match(/(\d+) insertion/)?.[1] || "0");
-	const deleted = parseInt(stat.match(/(\d+) deletion/)?.[1] || "0");
-	const files = parseInt(stat.match(/(\d+) file/)?.[1] || "0");
+function parseDiffStats(stat: string): DiffStats | null {
+	const added = parseInt(stat.match(/(\d+) insertion/)?.[1] || "0", 10);
+	const deleted = parseInt(stat.match(/(\d+) deletion/)?.[1] || "0", 10);
+	const files = parseInt(stat.match(/(\d+) file/)?.[1] || "0", 10);
 	if (added === 0 && deleted === 0) return null;
 	return { added, deleted, files };
 }
@@ -62,51 +63,7 @@ interface PrStatus {
 	reviewDecision: string | null;
 }
 
-function fetchPrStatus(prUrl: string): PrStatus | null {
-	const match = prUrl.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-	if (!match) return null;
-	const [, owner, repo, number] = match;
-
-	const query = `query($owner: String!, $repo: String!, $number: Int!) {
-		repository(owner: $owner, name: $repo) {
-			pullRequest(number: $number) {
-				commits(last: 1) {
-					nodes {
-						commit {
-							statusCheckRollup {
-								contexts(first: 100) {
-									nodes {
-										__typename
-										... on CheckRun { status conclusion }
-										... on StatusContext { state }
-									}
-								}
-							}
-						}
-					}
-				}
-				reviewDecision
-				reviewThreads(first: 100) {
-					nodes { isResolved }
-				}
-			}
-		}
-	}`;
-
-	const raw = gh(
-		"api",
-		"graphql",
-		"-f",
-		`query=${query}`,
-		"-f",
-		`owner=${owner}`,
-		"-f",
-		`repo=${repo}`,
-		"-F",
-		`number=${number}`,
-	);
-	if (!raw) return null;
-
+function parsePrStatus(raw: string): PrStatus | null {
 	try {
 		const pr = JSON.parse(raw).data.repository.pullRequest;
 
@@ -162,73 +119,178 @@ function alignLine(
 }
 
 export default function (pi: ExtensionAPI) {
-	let cachedPrBranch: string | null = null;
-	let cachedPrUrl: string | null = null;
-	let cachedDiffBranch: string | null = null;
-	let cachedDiffStats: DiffStats | null = null;
-	let cachedPrStatus: PrStatus | null = null;
+	// Cached data — render always reads from these, never blocks.
+	let prUrl: string | null = null;
+	let prBranch: string | null = null;
+	let prStatus: PrStatus | null = null;
+	let diffStats: DiffStats | null = null;
+	let diffBranch: string | null = null;
+
+	// In-flight tracking to avoid duplicate async calls.
+	let prUrlFetching = false;
+	let prStatusFetching = false;
 	let prStatusFetchTime = 0;
+	let diffStatsFetching = false;
+	let diffStatsFetchTime = 0;
+
 	const baseBranch = getBaseBranch();
-
-	function getPrUrl(branch: string | null): string | null {
-		if (
-			!branch ||
-			branch === "main" ||
-			branch === "master" ||
-			branch === "detached"
-		)
-			return null;
-		if (branch === cachedPrBranch) return cachedPrUrl;
-		cachedPrBranch = branch;
-		cachedPrUrl =
-			gh("pr", "view", branch, "--json", "url", "-q", ".url") || null;
-		return cachedPrUrl;
-	}
-
-	function getDiffStats(branch: string | null): DiffStats | null {
-		if (!branch || branch === "detached") return null;
-		if (branch === cachedDiffBranch) return cachedDiffStats;
-		cachedDiffBranch = branch;
-		cachedDiffStats = getGitDiffStats(baseBranch);
-		return cachedDiffStats;
-	}
-
-	function getPrStatus(prUrl: string | null): PrStatus | null {
-		if (!prUrl) return null;
-		const now = Date.now();
-		if (cachedPrStatus && now - prStatusFetchTime < PR_STATUS_TTL)
-			return cachedPrStatus;
-		prStatusFetchTime = now;
-		cachedPrStatus = fetchPrStatus(prUrl);
-		return cachedPrStatus;
-	}
+	let requestRender: (() => void) | null = null;
 
 	function invalidateCaches() {
-		cachedPrBranch = null;
-		cachedPrUrl = null;
-		cachedDiffBranch = null;
-		cachedDiffStats = null;
-		cachedPrStatus = null;
+		prUrl = null;
+		prBranch = null;
+		prStatus = null;
 		prStatusFetchTime = 0;
+		diffStats = null;
+		diffBranch = null;
+		diffStatsFetchTime = 0;
+	}
+
+	async function fetchPrUrl(branch: string) {
+		if (prUrlFetching) return;
+		prUrlFetching = true;
+		prBranch = branch;
+		try {
+			prUrl =
+				(await execAsync("gh", [
+					"pr",
+					"view",
+					branch,
+					"--json",
+					"url",
+					"-q",
+					".url",
+				])) || null;
+		} catch {
+			prUrl = null;
+		}
+		prUrlFetching = false;
+		requestRender?.();
+		// Kick off PR status fetch now that we have the URL.
+		if (prUrl) fetchPrStatusAsync(prUrl);
+	}
+
+	async function fetchPrStatusAsync(url: string) {
+		if (prStatusFetching) return;
+		prStatusFetching = true;
+		prStatusFetchTime = Date.now();
+
+		const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+		if (!match) {
+			prStatusFetching = false;
+			return;
+		}
+		const [, owner, repo, number] = match;
+
+		const query = `query($owner: String!, $repo: String!, $number: Int!) {
+			repository(owner: $owner, name: $repo) {
+				pullRequest(number: $number) {
+					commits(last: 1) {
+						nodes {
+							commit {
+								statusCheckRollup {
+									contexts(first: 100) {
+										nodes {
+											__typename
+											... on CheckRun { status conclusion }
+											... on StatusContext { state }
+										}
+									}
+								}
+							}
+						}
+					}
+					reviewDecision
+					reviewThreads(first: 100) {
+						nodes { isResolved }
+					}
+				}
+			}
+		}`;
+
+		const raw = await execAsync("gh", [
+			"api",
+			"graphql",
+			"-f",
+			`query=${query}`,
+			"-f",
+			`owner=${owner}`,
+			"-f",
+			`repo=${repo}`,
+			"-F",
+			`number=${number}`,
+		]);
+
+		if (raw) prStatus = parsePrStatus(raw);
+		prStatusFetching = false;
+		requestRender?.();
+	}
+
+	async function fetchDiffStatsAsync(branch: string) {
+		if (diffStatsFetching) return;
+		diffStatsFetching = true;
+		diffStatsFetchTime = Date.now();
+		diffBranch = branch;
+
+		const raw = await execAsync("git", ["diff", baseBranch, "--shortstat"]);
+		diffStats = raw ? parseDiffStats(raw) : null;
+		diffStatsFetching = false;
+		requestRender?.();
+	}
+
+	/** Trigger background refreshes if caches are stale. Never blocks. */
+	function refreshIfNeeded(branch: string | null) {
+		// PR URL: fetch once per branch
+		if (
+			branch &&
+			branch !== "main" &&
+			branch !== "master" &&
+			branch !== "detached" &&
+			branch !== prBranch &&
+			!prUrlFetching
+		) {
+			fetchPrUrl(branch);
+		}
+
+		// PR status: refresh every PR_STATUS_TTL
+		if (prUrl && !prStatusFetching) {
+			const now = Date.now();
+			if (now - prStatusFetchTime >= PR_STATUS_TTL) {
+				fetchPrStatusAsync(prUrl);
+			}
+		}
+
+		// Diff stats: refresh every DIFF_STATS_TTL
+		if (branch && branch !== "detached" && !diffStatsFetching) {
+			const now = Date.now();
+			if (branch !== diffBranch || now - diffStatsFetchTime >= DIFF_STATS_TTL) {
+				fetchDiffStatsAsync(branch);
+			}
+		}
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
 		ctx.ui.setFooter((tui, theme, footerData) => {
+			requestRender = () => tui.requestRender();
+
 			const unsub = footerData.onBranchChange(() => {
 				invalidateCaches();
 				tui.requestRender();
 			});
 
 			return {
-				dispose: unsub,
-				invalidate() {
-					cachedDiffBranch = null;
-					cachedDiffStats = null;
+				dispose() {
+					unsub();
+					requestRender = null;
 				},
+				invalidate() {},
 				render(width: number): string[] {
 					const pad = " ";
 					const sep = theme.fg("dim", " │ ");
 					const branch = footerData.getGitBranch();
+
+					// Kick off background fetches if needed — never blocks.
+					refreshIfNeeded(branch);
 
 					// === Line 1: left ===
 					const leftParts: string[] = [];
@@ -264,13 +326,15 @@ export default function (pi: ExtensionAPI) {
 					}
 					rightParts.push(theme.fg("dim", `$${totalCost.toFixed(2)}`));
 
-					const diff = getDiffStats(branch);
-					if (diff) {
+					if (diffStats) {
 						const d: string[] = [];
-						if (diff.added > 0) d.push(theme.fg("success", `+${diff.added}`));
-						if (diff.deleted > 0) d.push(theme.fg("error", `-${diff.deleted}`));
-						if (diff.files > 0) d.push(theme.fg("muted", `~${diff.files}`));
-						rightParts.push(d.join(" "));
+						if (diffStats.added > 0)
+							d.push(theme.fg("success", `+${diffStats.added}`));
+						if (diffStats.deleted > 0)
+							d.push(theme.fg("error", `-${diffStats.deleted}`));
+						if (diffStats.files > 0)
+							d.push(theme.fg("muted", `~${diffStats.files}`));
+						if (d.length > 0) rightParts.push(d.join(" "));
 					}
 
 					const left = pad + leftParts.join(sep);
@@ -278,29 +342,27 @@ export default function (pi: ExtensionAPI) {
 					const lines = [alignLine(left, right, width, sep)];
 
 					// === Line 2: PR URL + status (optional) ===
-					const prUrl = getPrUrl(branch);
 					if (prUrl) {
 						const prLeft = pad + theme.fg("muted", prUrl);
-						const status = getPrStatus(prUrl);
 
-						if (status) {
+						if (prStatus) {
 							const sections: string[] = [];
 
 							const review: string[] = [];
-							if (status.reviewDecision === "APPROVED")
+							if (prStatus.reviewDecision === "APPROVED")
 								review.push(theme.fg("success", "Approved"));
-							else if (status.reviewDecision === "CHANGES_REQUESTED")
+							else if (prStatus.reviewDecision === "CHANGES_REQUESTED")
 								review.push(theme.fg("error", "Changes Requested"));
-							if (status.unresolvedComments > 0) {
+							if (prStatus.unresolvedComments > 0) {
 								const word =
-									status.unresolvedComments === 1 ? "comment" : "comments";
+									prStatus.unresolvedComments === 1 ? "comment" : "comments";
 								review.push(
-									theme.fg("muted", `${status.unresolvedComments} ${word}`),
+									theme.fg("muted", `${prStatus.unresolvedComments} ${word}`),
 								);
 							}
 							if (review.length > 0) sections.push(review.join(sep));
 
-							const { pass, fail, pending } = status.checks;
+							const { pass, fail, pending } = prStatus.checks;
 							const ci: string[] = [];
 							if (fail > 0) ci.push(theme.fg("error", `${fail} Failed`));
 							if (pending > 0)
