@@ -1,0 +1,8 @@
+[project]
+name = "pi-agent"
+version = "0.1.0"
+description = "Personal pi agent configuration"
+requires-python = ">=3.13"
+dependencies = [
+    "pre-commit",
+]

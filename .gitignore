@@ -1,0 +1,9 @@
+auth.json
+bin/
+sessions/
+
+.DS_Store
+Thumbs.db
+
+.venv/
+**/node_modules/
