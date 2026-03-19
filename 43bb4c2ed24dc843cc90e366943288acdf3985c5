@@ -1,0 +1,23 @@
+themes/sonokai-atlantis.json
+  7e55f6e3082e38e8 1-91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "43bb4c2ed24dc843cc90e366943288acdf3985c5",
+  "prompts": {
+    "7e55f6e3082e38e8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f60acfe2-175c-4afd-bbcd-365162b1d9cc",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "lcian <17258265+lcian@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 91,
+      "overriden_lines": 0
+    }
+  }
+}
