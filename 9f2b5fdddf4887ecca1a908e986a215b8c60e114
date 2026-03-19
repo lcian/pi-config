@@ -1,0 +1,23 @@
+extensions/footer.ts
+  7e55f6e3082e38e8 7,9-10,23-27,29-31,34,39,52-55,66,122-131,133-135,137,139-155,162-170,173-226,229-238,241-269,274-275,283-284,286,292-293,329,331-337,348,352,354,356,358,360,365
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "9f2b5fdddf4887ecca1a908e986a215b8c60e114",
+  "prompts": {
+    "7e55f6e3082e38e8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f60acfe2-175c-4afd-bbcd-365162b1d9cc",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "lcian <17258265+lcian@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 193,
+      "total_deletions": 124,
+      "accepted_lines": 174,
+      "overriden_lines": 0
+    }
+  }
+}
