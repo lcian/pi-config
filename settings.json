@@ -1,5 +1,12 @@
 {
 	"lastChangelogVersion": "0.60.0",
 	"enabledModels": ["gpt-5.4", "claude-opus-4-6*", "claude-sonnet-4-6*"],
-	"defaultThinkingLevel": "high"
+	"defaultThinkingLevel": "high",
+	"defaultProvider": "openai-codex",
+	"defaultModel": "gpt-5.4",
+	"editorPaddingX": 1,
+	"steeringMode": "all",
+	"followUpMode": "all",
+	"hideThinkingBlock": true,
+	"collapseChangelog": true
 }
