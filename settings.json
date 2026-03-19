@@ -8,5 +8,6 @@
 	"steeringMode": "all",
 	"followUpMode": "all",
 	"hideThinkingBlock": true,
-	"collapseChangelog": true
+	"collapseChangelog": true,
+	"theme": "sonokai-atlantis"
 }
